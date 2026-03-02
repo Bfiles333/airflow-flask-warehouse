@@ -1,0 +1,1 @@
+create table if not exists dwh.product_discount_sales_data (id SERIAL PRIMARY KEY, product_sku VARCHAR, discount_amount NUMERIC, week_to_date_sales INT, month_to_date_sales INT, info_date DATETIME)
