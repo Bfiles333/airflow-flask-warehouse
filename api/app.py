@@ -99,3 +99,6 @@ def seed_raw_tables():
     finally:
         if raw_conn is not None:
             raw_conn.close()
+            
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
