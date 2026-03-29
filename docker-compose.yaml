@@ -1,0 +1,71 @@
+version: "3.8"
+
+services:
+
+  postgres:
+    image: postgres:15
+    container_name: mini_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - ${POSTGRES_PORT}:5432
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d
+    restart: unless-stopped
+
+  flask-api:
+    build: ./api
+    container_name: mini_flask
+    environment:
+      DATABASE_URL: ${SQLALCHEMY_DATABASE_URL}
+    ports:
+      - "5000:5000"
+    depends_on:
+      - postgres
+    restart: "no"
+    volumes:
+      - ./data:/app/data
+
+  airflow-webserver:
+    image: apache/airflow:2.8.1
+    container_name: mini_airflow_web
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false" 
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${SQLALCHEMY_DATABASE_URL}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+    depends_on:
+      - postgres
+    command: >
+      bash -c "
+      pip install requests &&
+      airflow db init &&
+      airflow users create --username admin --password admin --firstname Dev --lastname Dev --role Admin --email dev@example.com &&
+      airflow webserver
+      "
+    restart: unless-stopped
+
+  airflow-scheduler:
+    image: apache/airflow:2.8.1
+    container_name: mini_airflow_scheduler
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${SQLALCHEMY_DATABASE_URL}
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+    depends_on:
+      - postgres
+    command: airflow scheduler
+    restart: unless-stopped
+
+volumes:
+  pg_data:
