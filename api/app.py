@@ -15,6 +15,7 @@ engine = create_engine(DATABASE_URL)
 
 
 def dump_dataframe_via_copy_expert(table, raw_conn, keys, df):
+    """Dump a dataframe into a postgres table via COPY command."""
     with raw_conn.cursor() as cur:
         s_buf = StringIO()
         df.to_csv(
@@ -43,6 +44,7 @@ def dump_dataframe_via_copy_expert(table, raw_conn, keys, df):
 
 @app.route("/run/seed_raw_tables", methods=["POST"])
 def seed_raw_tables():
+    """Take the seed data from the provided csv files and dump them into corresponding postgres tables for further processing."""
     raw_conn = None
     try:
         raw_conn = engine.raw_connection()
