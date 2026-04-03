@@ -6,6 +6,7 @@ import logging
 from io import StringIO
 import csv
 import time
+from datetime import datetime
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
@@ -19,15 +20,11 @@ def dump_dataframe_via_copy_expert(table, raw_conn, keys, df):
     with raw_conn.cursor() as cur:
         s_buf = StringIO()
         df.to_csv(
-            s_buf,
-            index=False,
-            header=False,
-            quoting=csv.QUOTE_MINIMAL,
-            na_rep="\\N"
+            s_buf, index=False, header=False, quoting=csv.QUOTE_MINIMAL, na_rep="\\N"
         )
         s_buf.seek(0)
 
-        columns = ', '.join(f'"{k}"' for k in keys)
+        columns = ", ".join(f'"{k}"' for k in keys)
         sql = f"""
             COPY {table} ({columns})
             FROM STDIN WITH (
@@ -56,18 +53,17 @@ def seed_raw_tables():
 
         logger.info("Seed data loaded. Truncating tables...")
         with raw_conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 TRUNCATE raw.order_items, raw.orders, raw.products
                 RESTART IDENTITY
-            """)
+            """
+            )
         raw_conn.commit()
 
         logger.info("Tables truncated. Loading orders...")
         dump_dataframe_via_copy_expert(
-            table='"raw"."orders"',
-            raw_conn=raw_conn,
-            keys=orders.columns,
-            df=orders
+            table='"raw"."orders"', raw_conn=raw_conn, keys=orders.columns, df=orders
         )
         raw_conn.commit()
 
@@ -76,7 +72,7 @@ def seed_raw_tables():
             table='"raw"."products"',
             raw_conn=raw_conn,
             keys=products.columns,
-            df=products
+            df=products,
         )
         raw_conn.commit()
 
@@ -85,7 +81,7 @@ def seed_raw_tables():
             table='"raw"."order_items"',
             raw_conn=raw_conn,
             keys=order_items.columns,
-            df=order_items
+            df=order_items,
         )
         raw_conn.commit()
 
