@@ -101,6 +101,75 @@ def seed_raw_tables():
     finally:
         if raw_conn is not None:
             raw_conn.close()
-            
+
+
+@app.route("/run/product_discount_sales", methods=["POST"])
+def product_discount_sales():
+    with engine.connect() as conn:
+        product_df = pd.read_sql("select * from raw.products", con=conn)
+        order_item_df = pd.read_sql("select * from raw.order_items", con=conn)
+        final_data = []
+
+        logger.info(f"Processing products sold on date: {datetime.today().date()}")
+        for _, group in order_item_df.groupby("product_sku"):
+            discounted_subset = group[group["discount"] > 0]
+            final_data.append(
+                {
+                    "product_sku": group["product_sku"].iloc[0],
+                    "total_units_sold": int(group["quantity"].sum()),
+                    "units_sold_on_sale": (
+                        int(discounted_subset["quantity"].sum())
+                        if not discounted_subset.empty
+                        else 0
+                    ),
+                    "max_discount": (
+                        float(group["discount"].max())
+                        if not discounted_subset.empty
+                        else 0
+                    ),
+                    "avg_discount": (
+                        float(group["discount"].mean().round(2))
+                        if not discounted_subset.empty
+                        else 0
+                    ),
+                    "unit_price": group["unit_price"].iloc[0],
+                    "info_date": datetime.today(),
+                }
+            )
+
+        logger.info(f"processing products not sold on date: {datetime.today().date()}")
+        for _, product in product_df[
+            ~product_df["sku"].isin(order_item_df["product_sku"].unique().tolist())
+        ]:
+            final_data.append(
+                {
+                    "product_sku": product["product_sku"].iloc[0],
+                    "total_units_sold": 0,
+                    "units_sold_on_sale": 0,
+                    "max_discount": 0,
+                    "avg_discount": 0,
+                    "unit_price": product["unit_price"].iloc[0],
+                    "info_date": datetime.today(),
+                }
+            )
+
+        logger.info("All data processed, consolidating into a pandas dataframe...")
+        final_df = pd.DataFrame.from_records(final_data)
+
+        logger.info(
+            f"{len(final_df)} records processed, dumping into product_discount_sales_data table..."
+        )
+        with engine.raw_connection() as conn:
+            dump_dataframe_via_copy_expert(
+                table="dwh.product_discount_sales_data",
+                raw_conn=conn,
+                keys=final_df.keys(),
+                df=final_df,
+            )
+            conn.commit()
+
+        logger.info("Dataframe successfully dumped")
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
