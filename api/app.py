@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 
 app = Flask(__name__)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("airflow.task")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
