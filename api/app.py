@@ -9,7 +9,16 @@ import time
 from datetime import datetime
 
 app = Flask(__name__)
-logger = logging.getLogger("airflow.task")
+logger = logging.getLogger("mini_flask")
+logger.setLevel(logging.INFO)
+
+fh = logging.FileHandler("mini_flask.log")
+fh.setLevel(logging.INFO)
+
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+fh.setFormatter(formatter)
+
+logger.addHandler(fh)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
@@ -134,20 +143,25 @@ def product_discount_sales():
             )
 
         logger.info(f"processing products not sold on date: {datetime.today().date()}")
-        for _, product in product_df[
-            ~product_df["sku"].isin(order_item_df["product_sku"].unique().tolist())
-        ]:
-            final_data.append(
-                {
-                    "product_sku": product["product_sku"].iloc[0],
-                    "total_units_sold": 0,
-                    "units_sold_on_sale": 0,
-                    "max_discount": 0,
-                    "avg_discount": 0,
-                    "unit_price": product["unit_price"].iloc[0],
-                    "info_date": datetime.today(),
-                }
-            )
+        try:
+            for _, product in product_df[
+                ~product_df["product_sku"].isin(
+                    order_item_df["product_sku"].unique().tolist()
+                )
+            ].iterrows():
+                final_data.append(
+                    {
+                        "product_sku": product["product_sku"],
+                        "total_units_sold": 0,
+                        "units_sold_on_sale": 0,
+                        "max_discount": 0,
+                        "avg_discount": 0,
+                        "unit_price": product["unit_price"],
+                        "info_date": datetime.today(),
+                    }
+                )
+        except Exception as e:
+            logger.error(msg=e, exc_info=True)
 
         logger.info("All data processed, consolidating into a pandas dataframe...")
         final_df = pd.DataFrame.from_records(final_data)
@@ -155,16 +169,21 @@ def product_discount_sales():
         logger.info(
             f"{len(final_df)} records processed, dumping into product_discount_sales_data table..."
         )
-        with engine.raw_connection() as conn:
-            dump_dataframe_via_copy_expert(
-                table="dwh.product_discount_sales_data",
-                raw_conn=conn,
-                keys=final_df.keys(),
-                df=final_df,
-            )
-            conn.commit()
+        try:
+            with engine.raw_connection() as conn:
+                dump_dataframe_via_copy_expert(
+                    table="dwh.product_discount_sales_data",
+                    raw_conn=conn,
+                    keys=final_df.keys(),
+                    df=final_df,
+                )
+                conn.commit()
+        except Exception as e:
+            logger.error(msg=e, exc_info=True)
+            return {"status": "failure"}
 
         logger.info("Dataframe successfully dumped")
+        return {"status": "success"}
 
 
 if __name__ == "__main__":
