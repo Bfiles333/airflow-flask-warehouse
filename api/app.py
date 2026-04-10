@@ -24,6 +24,11 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
 
 
+@app.route("/health", methods=["GET"])
+def health():
+    return {"status": "ok"}
+
+
 def dump_dataframe_via_copy_expert(table, raw_conn, keys, df):
     """Dump a dataframe into a postgres table via COPY command."""
     with raw_conn.cursor() as cur:
