@@ -1,1 +1,1 @@
-create table if not exists dwh.product_discount_sales_data (id SERIAL PRIMARY KEY, product_sku VARCHAR, product_name VARCHAR, unit_price NUMERIC(9, 2), total_units_sold integer, units_sold_on_sale integer, avg_discount integer, max_discount integer, info_date timestamp)
+create table if not exists dwh.product_discount_sales_data (id SERIAL PRIMARY KEY, product_sku VARCHAR, product_name VARCHAR, unit_price NUMERIC(9, 2), total_units_sold integer, units_sold_on_sale integer, avg_discount NUMERIC(9, 2), max_discount NUMERIC(9, 2), info_date timestamp)
