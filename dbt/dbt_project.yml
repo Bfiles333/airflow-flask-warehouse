@@ -1,0 +1,12 @@
+name: 'warehouse'
+version: '1.0.0'
+config-version: 2
+
+profile: 'airflow_warehouse'
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+
+models:
+  warehouse:
+    +materialized: table
