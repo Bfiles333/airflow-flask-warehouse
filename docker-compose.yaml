@@ -14,20 +14,67 @@ services:
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
+      interval: 10s
+      retries: 5
     restart: unless-stopped
+
+  localstack:
+    image: localstack/localstack:latest
+    container_name: mini_localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - DEFAULT_REGION=us-east-1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  localstack-init:
+    image: amazon/aws-cli
+    container_name: mini_localstack_init
+    depends_on:
+      localstack:
+        condition: service_healthy
+    environment:
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+    volumes:
+      - ./data:/tmp/data
+    entrypoint: >
+      /bin/sh -c "
+        aws --endpoint-url=http://localstack:4566 s3 mb s3://warehouse-data --region us-east-1 &&
+        aws --endpoint-url=http://localstack:4566 s3 cp /tmp/data/orders.csv s3://warehouse-data/orders.csv &&
+        aws --endpoint-url=http://localstack:4566 s3 cp /tmp/data/order_items.csv s3://warehouse-data/order_items.csv &&
+        aws --endpoint-url=http://localstack:4566 s3 cp /tmp/data/products.csv s3://warehouse-data/products.csv &&
+        echo 'S3 init complete.'
+      "
+    restart: "no"
 
   flask-api:
     build: ./api
     container_name: mini_flask
     environment:
       DATABASE_URL: ${SQLALCHEMY_DATABASE_URL}
+      S3_ENDPOINT_URL: http://localstack:4566
+      S3_BUCKET: warehouse-data
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
     ports:
       - "5000:5000"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
     restart: "no"
-    volumes:
-      - ./data:/app/data
 
   airflow-webserver:
     image: apache/airflow:2.8.1
@@ -35,20 +82,25 @@ services:
     environment:
       AIRFLOW__CORE__EXECUTOR: SequentialExecutor
       AIRFLOW__CORE__FERNET_KEY: ''
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false" 
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${SQLALCHEMY_DATABASE_URL}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
       - "8080:8080"
     volumes:
       - ./airflow/dags:/opt/airflow/dags
+      - ./dbt:/opt/airflow/dbt
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     command: >
       bash -c "
-      pip install requests &&
-      airflow db init &&
-      airflow users create --username admin --password admin --firstname Dev --lastname Dev --role Admin --email dev@example.com &&
-      airflow webserver
+        pip install requests dbt-postgres &&
+        airflow db init &&
+        airflow users create --username admin --password admin --firstname Dev --lastname Dev --role Admin --email dev@example.com &&
+        airflow webserver
       "
     restart: unless-stopped
 
@@ -60,11 +112,17 @@ services:
       AIRFLOW__CORE__FERNET_KEY: ''
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${SQLALCHEMY_DATABASE_URL}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - ./airflow/dags:/opt/airflow/dags
+      - ./dbt:/opt/airflow/dbt
     depends_on:
-      - postgres
-    command: airflow scheduler
+      postgres:
+        condition: service_healthy
+    command: >
+      bash -c "pip install requests dbt-postgres && airflow scheduler"
     restart: unless-stopped
 
 volumes:
