@@ -1,71 +1,91 @@
 # Airflow Flask Warehouse
 
-## Overview
+A containerized, end-to-end data pipeline that ingests retail CSV data from S3, stages it in a raw layer, and transforms it into a reporting-ready data warehouse — orchestrated by Apache Airflow, executed via a Flask microservice, and transformed by dbt.
 
-This project is a containerized ETL pipeline that demonstrates a simple data warehouse architecture using Airflow, Flask, and Postgres.
+---
 
-Airflow orchestrates the pipeline by triggering Flask API endpoints, which ingest and transform CSV-based retail data into a Postgres data warehouse with separate raw and reporting layers.
+## Tech Stack
+
+| Tool | Version | Role |
+|---|---|---|
+| Apache Airflow | 2.8.1 | Orchestration & scheduling |
+| dbt-postgres | — | SQL-based transformation layer |
+| Flask | — | Ingestion execution layer (REST API) |
+| PostgreSQL | 15 | Raw + DWH storage |
+| LocalStack | latest | Local S3 simulation (AWS-compatible) |
+| boto3 | — | S3 client |
+| Pandas | — | In-memory CSV parsing |
+| Docker Compose | — | Multi-service containerization |
 
 ---
 
 ## Architecture
 
-The system consists of three main components:
-
-* **Postgres**
-
-  * Stores both raw and transformed (DWH) data
-  * Organized into two schemas:
-
-    * `raw` → ingested source data
-    * `dwh` → processed reporting data
-
-* **Flask API**
-
-  * Acts as the execution layer
-  * Exposes endpoints to:
-
-    * load seed data into raw tables
-    * process and transform data into warehouse tables
-
-* **Airflow**
-
-  * Orchestrates the pipeline
-  * Calls Flask endpoints via HTTP
-  * Provides scheduling, monitoring, and retry capabilities
+```
+┌──────────────────────────────────────────────────────────────┐
+│                        Docker Network                         │
+│                                                              │
+│  ┌────────────────┐   HTTP POST   ┌──────────────────────┐   │
+│  │    Airflow     │ ────────────► │     Flask API        │   │
+│  │  (DAG task 1)  │               │  reads S3 → raw PG   │   │
+│  └────────┬───────┘               └──────────────────────┘   │
+│           │                                                   │
+│           │ BashOperator          ┌──────────────────────┐   │
+│           └─────────────────────► │       dbt run        │   │
+│             (DAG task 2)          │  raw → dwh SQL model  │   │
+│                                   └──────────────────────┘   │
+│                                                              │
+│  ┌──────────────────┐    ┌────────────────────────────────┐  │
+│  │   LocalStack S3  │    │         PostgreSQL 15           │  │
+│  │  warehouse-data/ │    │   schema: raw  |  schema: dwh  │  │
+│  └──────────────────┘    └────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## Pipeline Flow
+## Pipeline
 
-The pipeline is composed of two main stages:
+```
+S3 (LocalStack)
+  orders.csv        ──►  raw.orders        ┐
+  order_items.csv   ──►  raw.order_items   ├──► (dbt) dwh.product_discount_sales_data
+  products.csv      ──►  raw.products      ┘
+```
 
-### 1. Seed Raw Tables
+**Task 1 — Seed raw tables** (`seed_raw_tables`): Airflow calls a Flask endpoint that reads three CSV files from S3 using boto3 and bulk-loads them into the `raw` schema using PostgreSQL's `COPY FROM STDIN`.
 
-* Reads CSV files:
+**Task 2 — dbt transform** (`run_dbt_models`): Airflow runs `dbt run` via BashOperator. The dbt model joins `raw.order_items` and `raw.products`, computes per-product discount metrics in SQL, and materializes the result as `dwh.product_discount_sales_data`.
 
-  * `orders.csv`
-  * `order_items.csv`
-  * `products.csv`
-* Loads data into:
+### DAG
 
-  * `raw.orders`
-  * `raw.order_items`
-  * `raw.products`
-* Uses Postgres `COPY` for efficient bulk loading
+```
+seed_raw_tables >> run_dbt_models
+```
 
-### 2. Process Discount Sales Data
+Scheduled `@daily`. `catchup=False` so missed runs do not backfill.
 
-* Reads data from raw tables
-* Aggregates product-level metrics:
+---
 
-  * total units sold
-  * units sold on discount
-  * average discount
-  * maximum discount
-* Writes results into:
+## dbt Model: `product_discount_sales_data`
 
-  * `dwh.product_discount_sales_data`
+The transform is a single SQL model with two CTEs:
+
+```sql
+sold_products   -- aggregates order_items by product_sku
+all_products    -- LEFT JOINs products to sold_products (preserves unsold products with 0s)
+```
+
+| Column | Description |
+|---|---|
+| `product_sku` | Product identifier |
+| `product_name` | Product display name |
+| `unit_price` | Listed unit price |
+| `total_units_sold` | All units sold |
+| `units_sold_on_sale` | Units sold with a non-zero discount |
+| `avg_discount` | Mean discount across discounted line items |
+| `max_discount` | Highest discount applied |
+| `info_date` | Processing timestamp |
 
 ---
 
@@ -76,23 +96,31 @@ airflow-flask-warehouse/
 │
 ├── airflow/
 │   └── dags/
-│       └── daily_sales_etl.py
+│       └── daily_sales_etl.py        # Airflow DAG — seed via Flask, transform via dbt
 │
 ├── api/
-│   ├── app.py
+│   ├── app.py                        # Flask — reads S3, bulk-loads raw tables
 │   ├── Dockerfile
 │   └── requirements.txt
+│
+├── dbt/
+│   ├── dbt_project.yml
+│   ├── profiles.yml                  # Connects to Postgres via env vars
+│   ├── macros/
+│   │   └── generate_schema_name.sql  # Writes to dwh schema directly
+│   └── models/
+│       ├── sources.yml               # Declares raw schema as dbt source
+│       └── product_discount_sales_data.sql
 │
 ├── db/
 │   └── init/
 │       ├── 001_create_schemas.sql
-│       ├── 002_create_raw_tables.sql
-│       └── 003_create_dwh_tables.sql
+│       └── 002_create_raw_tables.sql
 │
 ├── data/
 │   ├── orders.csv
 │   ├── order_items.csv
-│   └── products.csv
+│   └── products.csv                  # Uploaded to LocalStack S3 on startup
 │
 ├── docker-compose.yaml
 ├── .env.example
@@ -101,175 +129,56 @@ airflow-flask-warehouse/
 
 ---
 
-## How to Run
+## Key Engineering Decisions
 
-### 1. Clone the repository
+### S3 as the Data Source (via LocalStack)
+CSVs are served from a local S3-compatible store rather than read from disk. This mirrors real-world ingestion patterns where source files land in object storage before being loaded into a warehouse. LocalStack makes this fully self-contained — no AWS account required.
 
-```
+### dbt for the Transform Layer
+Business logic lives in SQL, not Python. dbt manages the DWH table schema, handles `DROP/CREATE` on each run, and makes the transformation independently testable with `dbt test`. This replaces the previous Pandas-based Flask endpoint.
+
+### Flask as the Ingestion Layer
+Flask encapsulates the raw loading logic behind a REST endpoint. Airflow stays a pure orchestrator making HTTP calls — it does not touch data directly.
+
+### Bulk Loading with `COPY FROM STDIN`
+Data is streamed from S3 into Postgres via the native `COPY` protocol, bypassing row-by-row inserts for efficient bulk loading.
+
+### Transaction Safety
+The seed endpoint commits per table and rolls back the entire connection on any failure, preventing partial loads from silently corrupting the raw layer.
+
+### Two-Layer Architecture (raw → dwh)
+Source data always lands in `raw` first. This makes the pipeline reprocessable without re-ingesting from S3 and keeps ingestion concerns separate from transformation concerns.
+
+---
+
+## Quick Start
+
+```bash
+# 1. Clone
 git clone https://github.com/Bfiles333/airflow-flask-warehouse.git
 cd airflow-flask-warehouse
-```
 
-### 2. Create environment file
-
-```
+# 2. Configure environment
 cp .env.example .env
-```
 
-### 3. Start services
-
-```
+# 3. Start all services
 docker compose up --build
 ```
 
-### 4. Access Airflow UI
+On startup, `localstack-init` automatically creates the `warehouse-data` S3 bucket and uploads the three CSV files.
 
-```
-http://localhost:8080
-```
+**Airflow UI:** [http://localhost:8080](http://localhost:8080) — `admin` / `admin`
 
-Login:
+Enable the `daily_discount_sales_etl` DAG. It runs on a daily schedule or can be triggered manually.
 
-```
-username: admin
-password: admin
-```
-
-### 5. Run the pipeline
-
-* Enable the DAG
-* Trigger it manually from the UI
+**Flask health check:** [http://localhost:5000/health](http://localhost:5000/health)
 
 ---
 
-## DAG Design
+## Roadmap
 
-The pipeline is implemented as a single Airflow DAG with two tasks:
-
-1. `seed_raw_tables`
-2. `process_daily_discount_sales`
-
-Task dependency:
-
-```
-seed_raw_tables >> process_daily_discount_sales
-```
-
-This ensures that raw data is always loaded before transformations are executed.
-
----
-
-## Design Decisions
-
-### Raw vs DWH Layering
-
-Instead of processing CSVs directly into a final table, the pipeline uses a layered approach:
-
-```
-CSV → raw → dwh
-```
-
-This allows:
-
-* easier debugging
-* reprocessing without re-ingestion
-* clearer separation of concerns
-
----
-
-### Flask as Execution Layer
-
-Flask is used to encapsulate business logic and data processing.
-
-Benefits:
-
-* reusable endpoints
-* easy integration with Airflow
-* separation between orchestration and execution
-
----
-
-### Airflow for Orchestration
-
-Airflow handles:
-
-* scheduling
-* retries
-* monitoring
-
-It interacts with Flask via HTTP calls, mimicking real-world service-based architectures.
-
----
-
-### Bulk Loading with COPY
-
-Instead of inserting rows one-by-one, the pipeline uses:
-
-```
-COPY FROM STDIN
-```
-
-This significantly improves performance when loading large datasets into Postgres.
-
----
-
-## Data Model
-
-### Raw Tables
-
-* `raw.orders`
-* `raw.order_items`
-* `raw.products`
-
-### DWH Table
-
-* `dwh.product_discount_sales_data`
-
-Contains aggregated product-level metrics for reporting.
-
----
-
-## Limitations / Future Improvements
-
-* Add idempotent loads (avoid duplicate daily records)
-* Add data quality validation checks
-* Add audit/logging table for pipeline runs
-* Parameterize processing date (instead of using current timestamp)
-* Replace pandas transformations with SQL-based transformations
-* Add automated scheduling instead of manual DAG trigger
-
----
-
-## Example Output
-
-Example metrics generated per product:
-
-* total units sold
-* units sold on discount
-* average discount
-* maximum discount
-
----
-
-## Tech Stack
-
-* Python
-* Flask
-* Apache Airflow
-* PostgreSQL
-* Docker / Docker Compose
-* Pandas
-
----
-
-## Summary
-
-This project demonstrates:
-
-* building a multi-service data pipeline
-* orchestrating ETL workflows with Airflow
-* designing raw vs warehouse data layers
-* performing efficient bulk data loading
-* exposing processing logic via APIs
-
-It is designed as a practical, end-to-end example of a small-scale data engineering system.
+- Swap LocalStack for real S3/GCS to demonstrate cloud-native ingestion
+- Add `dbt test` task to the DAG for data quality assertions before writing to `dwh`
+- Parameterize `info_date` — pass processing date from Airflow to dbt via `--vars`
+- Add incremental dbt model to avoid full table replacement on each run
+- Add audit log table tracking pipeline run metadata (rows written, duration, status)
