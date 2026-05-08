@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask
 import os
 from sqlalchemy import create_engine
 import pandas as pd
@@ -6,7 +6,7 @@ import logging
 from io import StringIO
 import csv
 import time
-from datetime import datetime
+import boto3
 
 app = Flask(__name__)
 logger = logging.getLogger("mini_flask")
@@ -14,23 +14,31 @@ logger.setLevel(logging.INFO)
 
 fh = logging.FileHandler("mini_flask.log")
 fh.setLevel(logging.INFO)
-
 formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 fh.setFormatter(formatter)
-
 logger.addHandler(fh)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
 
+s3 = boto3.client(
+    "s3",
+    endpoint_url=os.environ.get("S3_ENDPOINT_URL"),
+    aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID", "test"),
+    aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY", "test"),
+    region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+)
 
-@app.route("/health", methods=["GET"])
-def health():
-    return {"status": "ok"}
+S3_BUCKET = os.environ.get("S3_BUCKET", "warehouse-data")
+
+
+def read_csv_from_s3(key):
+    logger.info(f"Reading s3://{S3_BUCKET}/{key}")
+    obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
+    return pd.read_csv(obj["Body"])
 
 
 def dump_dataframe_via_copy_expert(table, raw_conn, keys, df):
-    """Dump a dataframe into a postgres table via COPY command."""
     with raw_conn.cursor() as cur:
         s_buf = StringIO()
         df.to_csv(
@@ -53,35 +61,33 @@ def dump_dataframe_via_copy_expert(table, raw_conn, keys, df):
         logger.info(f"Finished COPY into {table} in {time.time() - start:.2f}s")
 
 
+@app.route("/health", methods=["GET"])
+def health():
+    return {"status": "ok"}
+
+
 @app.route("/run/seed_raw_tables", methods=["POST"])
 def seed_raw_tables():
-    """Take the seed data from the provided csv files and dump them into corresponding postgres tables for further processing."""
     raw_conn = None
     try:
         raw_conn = engine.raw_connection()
 
-        logger.info("Loading seed data...")
-        orders = pd.read_csv("/app/data/orders.csv")
-        order_items = pd.read_csv("/app/data/order_items.csv")
-        products = pd.read_csv("/app/data/products.csv")
+        orders = read_csv_from_s3("orders.csv")
+        order_items = read_csv_from_s3("order_items.csv")
+        products = read_csv_from_s3("products.csv")
 
-        logger.info("Seed data loaded. Truncating tables...")
+        logger.info("Truncating raw tables...")
         with raw_conn.cursor() as cur:
             cur.execute(
-                """
-                TRUNCATE raw.order_items, raw.orders, raw.products
-                RESTART IDENTITY
-            """
+                "TRUNCATE raw.order_items, raw.orders, raw.products RESTART IDENTITY"
             )
         raw_conn.commit()
 
-        logger.info("Tables truncated. Loading orders...")
         dump_dataframe_via_copy_expert(
             table='"raw"."orders"', raw_conn=raw_conn, keys=orders.columns, df=orders
         )
         raw_conn.commit()
 
-        logger.info("Orders loaded. Loading products...")
         dump_dataframe_via_copy_expert(
             table='"raw"."products"',
             raw_conn=raw_conn,
@@ -90,7 +96,6 @@ def seed_raw_tables():
         )
         raw_conn.commit()
 
-        logger.info("Products loaded. Loading order_items...")
         dump_dataframe_via_copy_expert(
             table='"raw"."order_items"',
             raw_conn=raw_conn,
@@ -111,84 +116,6 @@ def seed_raw_tables():
     finally:
         if raw_conn is not None:
             raw_conn.close()
-
-
-@app.route("/run/product_discount_sales", methods=["POST"])
-def product_discount_sales():
-    with engine.connect() as conn:
-        product_df = pd.read_sql("select * from raw.products", con=conn)
-        order_item_df = pd.read_sql("select * from raw.order_items", con=conn)
-        final_data = []
-
-        logger.info(f"Processing products sold on date: {datetime.today().date()}")
-        for _, group in order_item_df.groupby("product_sku"):
-            discounted_subset = group[group["discount"] > 0]
-            final_data.append(
-                {
-                    "product_sku": group["product_sku"].iloc[0],
-                    "total_units_sold": int(group["quantity"].sum()),
-                    "units_sold_on_sale": (
-                        int(discounted_subset["quantity"].sum())
-                        if not discounted_subset.empty
-                        else 0
-                    ),
-                    "max_discount": (
-                        float(group["discount"].max())
-                        if not discounted_subset.empty
-                        else 0
-                    ),
-                    "avg_discount": (
-                        float(group["discount"].mean().round(2))
-                        if not discounted_subset.empty
-                        else 0
-                    ),
-                    "unit_price": group["unit_price"].iloc[0],
-                    "info_date": datetime.today(),
-                }
-            )
-
-        logger.info(f"processing products not sold on date: {datetime.today().date()}")
-        try:
-            for _, product in product_df[
-                ~product_df["product_sku"].isin(
-                    order_item_df["product_sku"].unique().tolist()
-                )
-            ].iterrows():
-                final_data.append(
-                    {
-                        "product_sku": product["product_sku"],
-                        "total_units_sold": 0,
-                        "units_sold_on_sale": 0,
-                        "max_discount": 0,
-                        "avg_discount": 0,
-                        "unit_price": product["unit_price"],
-                        "info_date": datetime.today(),
-                    }
-                )
-        except Exception as e:
-            logger.error(msg=e, exc_info=True)
-
-        logger.info("All data processed, consolidating into a pandas dataframe...")
-        final_df = pd.DataFrame.from_records(final_data)
-
-        logger.info(
-            f"{len(final_df)} records processed, dumping into product_discount_sales_data table..."
-        )
-        try:
-            with engine.raw_connection() as conn:
-                dump_dataframe_via_copy_expert(
-                    table="dwh.product_discount_sales_data",
-                    raw_conn=conn,
-                    keys=final_df.keys(),
-                    df=final_df,
-                )
-                conn.commit()
-        except Exception as e:
-            logger.error(msg=e, exc_info=True)
-            return {"status": "failure"}
-
-        logger.info("Dataframe successfully dumped")
-        return {"status": "success"}
 
 
 if __name__ == "__main__":
